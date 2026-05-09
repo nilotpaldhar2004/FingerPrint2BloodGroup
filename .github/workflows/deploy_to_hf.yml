@@ -28,7 +28,7 @@ jobs:
       #      HF_USERNAME → your HuggingFace username  (e.g. nilotpal09)
       - name: Push to HuggingFace Space
         env:
-          HF_TOKEN:    ${{ secrets.HF_TOKEN }}
+          HF_TOKEN:    ${{ secrets.HF_TOKENG }}
           HF_USERNAME: ${{ secrets.HF_USERNAME }}
         run: |
           # Configure git identity for the push
