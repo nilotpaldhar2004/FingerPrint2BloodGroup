@@ -26,7 +26,7 @@ CLASSES_PATH = os.getenv("CLASSES_PATH", "blood_group_classes.npy")
 PORT         = int(os.getenv("PORT", 7860))
 IMG_SIZE     = 448
 
-ml = {}  # shared model store
+ml = {}
 
 # ── 2. TRANSFORMS ─────────────────────────────────────────────────────────────
 transform = transforms.Compose([
@@ -40,11 +40,13 @@ transform = transforms.Compose([
 def build_model(num_classes: int) -> nn.Module:
     model = models.resnet50(weights=None)
 
-    # Freeze backbone — must match training setup
+    # ── Keep backbone TRAINABLE for Grad-CAM gradient flow ──
+    # We do NOT freeze here. The saved weights already encode the frozen state.
+    # Grad-CAM needs gradients through layer4, so requires_grad must be True.
     for p in model.parameters():
-        p.requires_grad = False
+        p.requires_grad = True
 
-    num_features = model.fc.in_features
+    num_features = model.fc.in_features          # 2048
     model.fc = nn.Sequential(
         nn.Linear(num_features, 1024),
         nn.BatchNorm1d(1024),
@@ -75,18 +77,24 @@ class GradCAM:
         self.mdl         = mdl
         self.gradients   = None
         self.activations = None
-        target_layer.register_forward_hook(
-            lambda _, __, out: setattr(self, "activations", out.detach())
-        )
-        target_layer.register_full_backward_hook(
-            lambda _, __, grad_out: setattr(self, "gradients", grad_out[0].detach())
-        )
+        target_layer.register_forward_hook(self._fwd_hook)
+        target_layer.register_full_backward_hook(self._bwd_hook)
+
+    def _fwd_hook(self, _, __, output):
+        self.activations = output.detach()
+
+    def _bwd_hook(self, _, __, grad_output):
+        self.gradients = grad_output[0].detach()
 
     def generate(self, tensor: torch.Tensor, class_idx: int) -> np.ndarray:
         self.mdl.zero_grad()
-        tensor = tensor.clone().requires_grad_(True)
-        out    = self.mdl(tensor)
-        out[0, class_idx].backward()
+
+        # Enable grad temporarily — model.eval() keeps BN/Dropout frozen
+        # but we need backward() to work for CAM
+        with torch.enable_grad():
+            tensor = tensor.clone().requires_grad_(True)
+            out    = self.mdl(tensor)
+            out[0, class_idx].backward()
 
         weights = self.gradients.mean(dim=(2, 3), keepdim=True)
         cam     = torch.relu((weights * self.activations).sum(dim=1)).squeeze()
@@ -110,15 +118,16 @@ def overlay_cam(pil_img: Image.Image, cam: np.ndarray) -> str:
 async def lifespan(app: FastAPI):
     logger.info("Loading AI resources...")
     try:
-        classes      = np.load(CLASSES_PATH, allow_pickle=True)
-        model        = build_model(num_classes=len(classes))
-        grad_cam     = GradCAM(model, target_layer=model.layer4[-1])
+        classes  = np.load(CLASSES_PATH, allow_pickle=True)
+        model    = build_model(num_classes=len(classes))
+        grad_cam = GradCAM(model, target_layer=model.layer4[-1])
+
         ml["model"]   = model
         ml["classes"] = classes
         ml["gradcam"] = grad_cam
-        logger.info(f"Model loaded. Classes: {list(classes)}")
+        logger.info(f"Model loaded successfully. Classes: {list(classes)}")
     except Exception as e:
-        logger.error(f"Startup failed: {e}")
+        logger.error(f"Startup failed: {e}", exc_info=True)
     yield
     ml.clear()
     logger.info("Resources released.")
@@ -146,7 +155,7 @@ async def health():
     ready = "model" in ml
     return {
         "status":  "ok" if ready else "loading",
-        "classes": list(ml["classes"]) if ready else [],
+        "classes": [str(c) for c in ml["classes"]] if ready else [],
     }
 
 
@@ -157,17 +166,20 @@ async def predict(file: UploadFile = File(...)):
     gradcam = ml.get("gradcam")
 
     if model is None or classes is None:
-        raise HTTPException(status_code=503, detail="Model not ready. Try again in a moment.")
+        raise HTTPException(status_code=503,
+                            detail="Model not ready. Try again in a moment.")
 
     if file.content_type not in ("image/jpeg", "image/png", "image/webp"):
-        raise HTTPException(status_code=400, detail="Only JPEG / PNG / WEBP accepted.")
+        raise HTTPException(status_code=400,
+                            detail="Only JPEG / PNG / WEBP accepted.")
 
     try:
-        t0        = time.perf_counter()
-        raw       = await file.read()
-        pil_img   = Image.open(io.BytesIO(raw)).convert("RGB")
-        tensor    = transform(pil_img).unsqueeze(0)
+        t0      = time.perf_counter()
+        raw     = await file.read()
+        pil_img = Image.open(io.BytesIO(raw)).convert("RGB")
+        tensor  = transform(pil_img).unsqueeze(0)   # [1, 3, 448, 448]
 
+        # ── Inference (no_grad for speed) ─────────────────────
         with torch.no_grad():
             outputs = model(tensor)
             probs   = torch.softmax(outputs[0], dim=0)
@@ -175,29 +187,31 @@ async def predict(file: UploadFile = File(...)):
 
         pred_idx   = idx.item()
         pred_label = str(classes[pred_idx])
+        confidence = round(float(conf.item()) * 100, 2)   # plain float
 
         all_probs = {
             str(classes[i]): round(float(probs[i]) * 100, 2)
             for i in range(len(classes))
         }
 
-        # Grad-CAM
+        # ── Grad-CAM (separate forward+backward pass) ──────────
         cam         = gradcam.generate(tensor, pred_idx)
         gradcam_b64 = overlay_cam(pil_img, cam)
 
         latency = round((time.perf_counter() - t0) * 1000, 2)
-        logger.info(f"Predicted: {pred_label} ({conf.item()*100:.2f}%) | {latency}ms")
+        logger.info(f"Predicted: {pred_label} | "
+                    f"Confidence: {confidence}% | {latency}ms")
 
         return JSONResponse({
             "predicted_class":   pred_label,
-            "confidence":        round(conf.item() * 100, 2),
+            "confidence":        confidence,        # float, e.g. 72.34
             "all_probabilities": all_probs,
             "gradcam_image":     gradcam_b64,
             "latency_ms":        latency,
         })
 
     except Exception as e:
-        logger.error(f"Prediction error: {e}")
+        logger.error(f"Prediction error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
