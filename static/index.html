@@ -229,6 +229,7 @@
           <div class="label">Predicted Blood Group</div>
           <div class="blood" id="res-class">—</div>
           <div class="conf" id="res-conf">Confidence: —</div>
+          <div style="margin-top:4px;font-size:0.75rem;color:#718096;" id="latency-info"></div>
         </div>
 
         <!-- Bar chart -->
@@ -320,30 +321,55 @@
 
   // ── Render ────────────────────────────────────────────────
   function renderResults(data) {
-    document.getElementById('res-class').textContent = data.predicted_class;
-    document.getElementById('res-conf').textContent  =
-        `Confidence: ${data.confidence.toFixed(2)}%`;
+    // Guard: validate required fields exist
+    if (!data.predicted_class || data.confidence === undefined) {
+      alert('Unexpected response from server. Check console for details.');
+      console.error('Bad response:', data);
+      return;
+    }
 
-    // Grad-CAM
-    document.getElementById('gradcam-img').src =
-        'data:image/jpeg;base64,' + data.gradcam_image;
+    document.getElementById('res-class').textContent = data.predicted_class;
+
+    // confidence is a plain float from server (e.g. 72.34)
+    const conf = typeof data.confidence === 'number'
+      ? data.confidence.toFixed(2)
+      : parseFloat(data.confidence).toFixed(2);
+    document.getElementById('res-conf').textContent = `Confidence: ${conf}%`;
+
+    // Grad-CAM — only render if present
+    const gradcamEl = document.getElementById('gradcam-img');
+    if (data.gradcam_image) {
+      gradcamEl.src = 'data:image/jpeg;base64,' + data.gradcam_image;
+      gradcamEl.style.display = 'block';
+    } else {
+      gradcamEl.style.display = 'none';
+    }
 
     // Bar chart
     const chart = document.getElementById('bar-chart');
     chart.innerHTML = '';
-    const sorted = Object.entries(data.all_probabilities)
-                         .sort((a, b) => b[1] - a[1]);
-    sorted.forEach(([cls, pct]) => {
-      const row = document.createElement('div');
-      row.className = 'bar-row';
-      row.innerHTML = `
-        <span class="cls">${cls}</span>
-        <div class="bar-bg">
-          <div class="bar-fill" style="width:${pct}%"></div>
-        </div>
-        <span class="pct">${pct.toFixed(1)}%</span>`;
-      chart.appendChild(row);
-    });
+    if (data.all_probabilities) {
+      const sorted = Object.entries(data.all_probabilities)
+                           .sort((a, b) => b[1] - a[1]);
+      sorted.forEach(([cls, pct]) => {
+        const val = typeof pct === 'number' ? pct : parseFloat(pct);
+        const row = document.createElement('div');
+        row.className = 'bar-row';
+        row.innerHTML = `
+          <span class="cls">${cls}</span>
+          <div class="bar-bg">
+            <div class="bar-fill" style="width:${val}%"></div>
+          </div>
+          <span class="pct">${val.toFixed(1)}%</span>`;
+        chart.appendChild(row);
+      });
+    }
+
+    // Show latency if available
+    if (data.latency_ms !== undefined) {
+      const latEl = document.getElementById('latency-info');
+      if (latEl) latEl.textContent = `Inference time: ${data.latency_ms} ms`;
+    }
 
     results.style.display = 'block';
     results.scrollIntoView({ behavior: 'smooth' });
