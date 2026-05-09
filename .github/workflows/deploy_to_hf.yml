@@ -1,0 +1,43 @@
+name: Deploy to HuggingFace Space
+
+on:
+  push:
+    branches:
+      - main          # triggers on every push to main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout your GitHub repo ──────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: true           # pull any Git LFS files (model weights)
+
+      # ── 2. Install HF CLI ─────────────────────────────────
+      - name: Install huggingface_hub CLI
+        run: pip install huggingface_hub
+
+      # ── 3. Push to HuggingFace Space ──────────────────────
+      #    Required GitHub Secrets:
+      #      HF_TOKEN  → your HuggingFace write token
+      #                  (Settings → Access Tokens → New token → write)
+      #      HF_USERNAME → your HuggingFace username  (e.g. nilotpal09)
+      - name: Push to HuggingFace Space
+        env:
+          HF_TOKEN:    ${{ secrets.HF_TOKEN }}
+          HF_USERNAME: ${{ secrets.HF_USERNAME }}
+        run: |
+          # Configure git identity for the push
+          git config --global user.email "deploy-bot@github-actions"
+          git config --global user.name  "GitHub Actions Bot"
+
+          # Add HuggingFace Space remote
+          git remote add hf \
+            https://$HF_USERNAME:$HF_TOKEN@huggingface.co/spaces/nilotpaldhar2004/fingerprint-blood-group
+
+          # Force-push current main to the HF Space (Space name = fingerprint-blood-group)
+          git push hf main --force
