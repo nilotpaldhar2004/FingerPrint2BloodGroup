@@ -1,43 +1,32 @@
-name: Deploy to HuggingFace Space
+name: Sync to HuggingFace Space
 
 on:
   push:
     branches:
-      - main          # triggers on every push to main
+      - main   # triggers on every push to main
 
 jobs:
-  deploy:
+  sync-to-hf:
     runs-on: ubuntu-latest
 
     steps:
-      # ── 1. Checkout your GitHub repo ──────────────────────
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Checkout GitHub repo
+        uses: actions/checkout@v3
         with:
-          fetch-depth: 0
-          lfs: true           # pull any Git LFS files (model weights)
+          fetch-depth: 0        # full history needed for HF sync
+          lfs: true             # if you ever add large files
 
-      # ── 2. Install HF CLI ─────────────────────────────────
-      - name: Install huggingface_hub CLI
-        run: pip install huggingface_hub
-
-      # ── 3. Push to HuggingFace Space ──────────────────────
-      #    Required GitHub Secrets:
-      #      HF_TOKEN  → your HuggingFace write token
-      #                  (Settings → Access Tokens → New token → write)
-      #      HF_USERNAME → your HuggingFace username  (e.g. nilotpal09)
       - name: Push to HuggingFace Space
         env:
-          HF_TOKEN:    ${{ secrets.HF_TOKENG }}
-          HF_USERNAME: ${{ secrets.HF_USERNAME }}
+          HF_TOKEN: ${{ secrets.HF_TOKENG }}
         run: |
-          # Configure git identity for the push
-          git config --global user.email "deploy-bot@github-actions"
-          git config --global user.name  "GitHub Actions Bot"
+          git config --global user.email "dharnilotpal31@gmail.com"
+          git config --global user.name "nilotpaldhar2004"
 
-          # Add HuggingFace Space remote
-          git remote add hf \
-            https://$HF_USERNAME:$HF_TOKEN@huggingface.co/spaces/nilotpaldhar2004/fingerprint-blood-group
+          # Add HuggingFace remote
+          git remote add hf https://$HF_USERNAME:$HF_TOKEN@huggingface.co/spaces/nilotpaldhar2004/fingerprint-blood-group
 
-          # Force-push current main to the HF Space (Space name = fingerprint-blood-group)
+          # Force push to HF (HF requires this for Space sync)
           git push hf main --force
+
+
