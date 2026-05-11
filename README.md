@@ -21,7 +21,7 @@ pinned: false
 ## ⚠️ Disclaimer
 
 This project is a **research and portfolio demonstration only**.  
-Current validation accuracy is ~51% on 8 classes — this model is **not suitable for clinical or diagnostic use**. Do not make any medical decisions based on its output.
+Current validation accuracy is **~85.78%** (test: 86.22%) — while this is strong performance, this model is **not suitable for clinical or diagnostic use**. Do not make any medical decisions based on its output.
 
 ---
 
@@ -55,13 +55,14 @@ Upload a fingerprint image → the model predicts the corresponding blood group 
 
 | Epoch | Val Accuracy |
 |-------|-------------|
-| 1     | 25.42%      |
-| 12    | 49.17%      |
-| 20    | 50.50%      |
-| 24    | **51.58%** ⭐ |
-| 25    | 51.08%      |
+| 1     | 34.67%      |
+| 10    | 67.11%      |
+| 17    | 81.00%      |
+| 22    | 84.00%      |
+| 27    | 85.00%      |
+| 31    | **85.78%** ⭐ |
 
-Training set: 4800 samples | Validation set: 1200 samples | Batch size: 32 | Epochs: 25
+Training set: 4200 samples | Val: 900 | Test: 900 | Batch: 32 | Early stop: epoch 46
 
 ---
 
