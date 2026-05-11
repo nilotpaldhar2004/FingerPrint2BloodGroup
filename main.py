@@ -40,10 +40,15 @@ transform = transforms.Compose([
 def build_model(num_classes: int) -> nn.Module:
     model = models.resnet50(weights=None)
 
-    # ── Keep backbone TRAINABLE for Grad-CAM gradient flow ──
-    # We do NOT freeze here. The saved weights already encode the frozen state.
-    # Grad-CAM needs gradients through layer4, so requires_grad must be True.
+    # ── Match training architecture exactly ──────────────────
+    # layer3 + layer4 were unfrozen during training.
+    # Grad-CAM also needs requires_grad=True on layer4.
+    # So: freeze all first, then selectively unfreeze layer3, layer4.
     for p in model.parameters():
+        p.requires_grad = False
+    for p in model.layer3.parameters():
+        p.requires_grad = True
+    for p in model.layer4.parameters():
         p.requires_grad = True
 
     num_features = model.fc.in_features          # 2048
