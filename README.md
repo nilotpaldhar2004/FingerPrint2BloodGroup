@@ -60,7 +60,7 @@ Upload a fingerprint image → the model predicts the corresponding blood group 
 | 22    | 84.00%      |
 | 31    | 85.78%      |
 | 74    | 86.11%      |
-| 86    | **87.22%** ⭐ |
+| 85    | **87.22%** ⭐ |
 
 Training set: 4200 samples | Val: 900 | Test: 900 | Batch: 32 | Early stop: epoch 86/100
 
