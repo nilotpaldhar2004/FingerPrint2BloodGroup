@@ -578,13 +578,18 @@
     try {
       const res = await fetch(`${API_BASE}/predict`, { method: 'POST', body: form });
       if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        alert('Error: ' + (err.detail || res.statusText));
+        const rawText = await res.text().catch(() => '');
+        let detail = '';
+        try { detail = JSON.parse(rawText).detail; } catch (_) { /* not JSON */ }
+        const reason = detail || rawText.slice(0, 200) || res.statusText || '(no message returned)';
+        alert(`Error ${res.status}: ${reason}`);
+        console.error('Predict request failed', { status: res.status, statusText: res.statusText, body: rawText });
         return;
       }
       renderResults(await res.json());
     } catch (e) {
-      alert('Request failed: ' + e.message);
+      alert('Request failed: ' + e.message + '\n\nThis usually means the request never reached the server — check that the backend URL is correct and that its CORS settings allow this site\'s origin.');
+      console.error('Predict fetch threw', e);
     } finally {
       predictBtn.disabled  = false;
       predictBtn.innerHTML = 'Run Classification';
@@ -643,11 +648,14 @@
   (async function loadModelInfo() {
     try {
       const res = await fetch(`${API_BASE}/model-info`);
-      if (!res.ok) return;
+      if (!res.ok) {
+        console.warn('model-info request failed', res.status, res.statusText);
+        return;
+      }
       const info = await res.json();
       if (info.val_accuracy) document.getElementById('stat-acc').textContent = `${info.val_accuracy}%`;
       if (info.num_classes)  document.getElementById('stat-classes').textContent = info.num_classes;
-    } catch (_) { /* endpoint optional — page still works without it */ }
+    } catch (e) { console.warn('model-info fetch threw', e); /* endpoint optional — page still works without it */ }
   })();
 </script>
 
