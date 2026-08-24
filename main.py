@@ -10,7 +10,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torchvision import models, transforms
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -25,6 +25,16 @@ MODEL_PATH   = os.getenv("MODEL_PATH",   "blood_group_resnet50_best.pth")
 CLASSES_PATH = os.getenv("CLASSES_PATH", "blood_group_classes.npy")
 PORT         = int(os.getenv("PORT", 7860))
 IMG_SIZE     = 448
+MAX_UPLOAD_BYTES = 8 * 1024 * 1024  # 8 MB — keep in sync with the frontend limit
+
+# Metadata surfaced to the frontend via /model-info. Kept as plain constants
+# (rather than re-deriving from the checkpoint) so it's obvious what to update
+# if the model is retrained.
+VAL_ACCURACY_PCT = float(os.getenv("VAL_ACCURACY_PCT", 87.22))
+
+# Use a GPU if one is available; fall back to CPU otherwise. Doing this once
+# at import time (rather than per-request) avoids repeated device lookups.
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 ml = {}
 
@@ -71,8 +81,9 @@ def build_model(num_classes: int) -> nn.Module:
     if not os.path.exists(MODEL_PATH):
         raise FileNotFoundError(f"Model file not found: {MODEL_PATH}")
 
-    state_dict = torch.load(MODEL_PATH, map_location="cpu", weights_only=True)
+    state_dict = torch.load(MODEL_PATH, map_location=DEVICE, weights_only=True)
     model.load_state_dict(state_dict)
+    model.to(DEVICE)
     model.eval()
     return model
 
@@ -121,7 +132,7 @@ def overlay_cam(pil_img: Image.Image, cam: np.ndarray) -> str:
 # ── 5. LIFESPAN ───────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Loading AI resources...")
+    logger.info(f"Loading AI resources on device={DEVICE} ...")
     try:
         classes  = np.load(CLASSES_PATH, allow_pickle=True)
         model    = build_model(num_classes=len(classes))
@@ -160,7 +171,27 @@ async def health():
     ready = "model" in ml
     return {
         "status":  "ok" if ready else "loading",
+        "device":  str(DEVICE),
         "classes": [str(c) for c in ml["classes"]] if ready else [],
+    }
+
+
+@app.get("/model-info")
+async def model_info():
+    """
+    Static metadata the frontend renders in its "Model Details" panel.
+    Kept separate from /predict so the details load instantly without
+    waiting on (or requiring) an uploaded image.
+    """
+    ready = "model" in ml
+    return {
+        "architecture":   "ResNet-50 (ImageNet-pretrained backbone, layer3+layer4 fine-tuned)",
+        "input_size":     IMG_SIZE,
+        "num_classes":    int(len(ml["classes"])) if ready else None,
+        "classes":        [str(c) for c in ml["classes"]] if ready else [],
+        "val_accuracy":   VAL_ACCURACY_PCT,
+        "device":         str(DEVICE),
+        "explainability": "Grad-CAM on the last block of layer4",
     }
 
 
@@ -179,10 +210,21 @@ async def predict(file: UploadFile = File(...)):
                             detail="Only JPEG / PNG / WEBP accepted.")
 
     try:
-        t0      = time.perf_counter()
-        raw     = await file.read()
-        pil_img = Image.open(io.BytesIO(raw)).convert("RGB")
-        tensor  = transform(pil_img).unsqueeze(0)   # [1, 3, 448, 448]
+        t0  = time.perf_counter()
+        raw = await file.read()
+
+        if len(raw) > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File too large — max {MAX_UPLOAD_BYTES // (1024 * 1024)}MB.",
+            )
+
+        try:
+            pil_img = Image.open(io.BytesIO(raw)).convert("RGB")
+        except UnidentifiedImageError:
+            raise HTTPException(status_code=400, detail="Could not read image file — is it corrupted?")
+
+        tensor = transform(pil_img).unsqueeze(0).to(DEVICE)   # [1, 3, 448, 448]
 
         # ── Inference (no_grad for speed) ─────────────────────
         with torch.no_grad():
@@ -215,6 +257,8 @@ async def predict(file: UploadFile = File(...)):
             "latency_ms":        latency,
         })
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Prediction error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
