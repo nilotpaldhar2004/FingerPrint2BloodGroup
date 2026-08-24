@@ -14,7 +14,6 @@ from PIL import Image, UnidentifiedImageError
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
 import uvicorn
 
 # ── 1. CONFIGURATION ─────────────────────────────────────────────────────────
@@ -87,7 +86,6 @@ class GradCAM:
         target_layer.register_full_backward_hook(self._bwd_hook)
 
     def _fwd_hook(self, _, __, output):
-        # Keep tensor attached during forward pass so backward computes correctly
         self.activations = output
 
     def _bwd_hook(self, _, __, grad_output):
@@ -152,14 +150,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-if os.path.exists("static"):
-    app.mount("/static", StaticFiles(directory="static"), name="static")
-
 # ── 7. ROUTES ─────────────────────────────────────────────────────────────────
 @app.get("/", include_in_schema=False)
 async def serve_frontend():
-    if os.path.exists("static/index.html"):
-        return FileResponse("static/index.html")
     if os.path.exists("index.html"):
         return FileResponse("index.html")
     return {"message": "FingerPrint2BloodGroup API — GET /docs for interactive reference."}
