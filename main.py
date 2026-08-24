@@ -21,19 +21,13 @@ import uvicorn
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s")
 logger = logging.getLogger("fingerprint2bloodgroup-api")
 
-MODEL_PATH   = os.getenv("MODEL_PATH",   "blood_group_resnet50_best.pth")
-CLASSES_PATH = os.getenv("CLASSES_PATH", "blood_group_classes.npy")
-PORT         = int(os.getenv("PORT", 7860))
-IMG_SIZE     = 448
-MAX_UPLOAD_BYTES = 8 * 1024 * 1024  # 8 MB — keep in sync with the frontend limit
+MODEL_PATH       = os.getenv("MODEL_PATH",   "blood_group_resnet50_best.pth")
+CLASSES_PATH     = os.getenv("CLASSES_PATH", "blood_group_classes.npy")
+PORT             = int(os.getenv("PORT", 7860))
+IMG_SIZE         = 448
+MAX_UPLOAD_BYTES = 8 * 1024 * 1024  # 8 MB
 
-# Metadata surfaced to the frontend via /model-info. Kept as plain constants
-# (rather than re-deriving from the checkpoint) so it's obvious what to update
-# if the model is retrained.
 VAL_ACCURACY_PCT = float(os.getenv("VAL_ACCURACY_PCT", 87.22))
-
-# Use a GPU if one is available; fall back to CPU otherwise. Doing this once
-# at import time (rather than per-request) avoids repeated device lookups.
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 ml = {}
@@ -50,10 +44,6 @@ transform = transforms.Compose([
 def build_model(num_classes: int) -> nn.Module:
     model = models.resnet50(weights=None)
 
-    # ── Match training architecture exactly ──────────────────
-    # layer3 + layer4 were unfrozen during training.
-    # Grad-CAM also needs requires_grad=True on layer4.
-    # So: freeze all first, then selectively unfreeze layer3, layer4.
     for p in model.parameters():
         p.requires_grad = False
     for p in model.layer3.parameters():
@@ -97,7 +87,8 @@ class GradCAM:
         target_layer.register_full_backward_hook(self._bwd_hook)
 
     def _fwd_hook(self, _, __, output):
-        self.activations = output.detach()
+        # Keep tensor attached during forward pass so backward computes correctly
+        self.activations = output
 
     def _bwd_hook(self, _, __, grad_output):
         self.gradients = grad_output[0].detach()
@@ -105,16 +96,18 @@ class GradCAM:
     def generate(self, tensor: torch.Tensor, class_idx: int) -> np.ndarray:
         self.mdl.zero_grad()
 
-        # Enable grad temporarily — model.eval() keeps BN/Dropout frozen
-        # but we need backward() to work for CAM
         with torch.enable_grad():
-            tensor = tensor.clone().requires_grad_(True)
+            tensor = tensor.clone().detach().requires_grad_(True)
             out    = self.mdl(tensor)
-            out[0, class_idx].backward()
+            score  = out[0, class_idx]
+            score.backward()
+
+        if self.gradients is None or self.activations is None:
+            raise RuntimeError("Failed to extract activations/gradients for Grad-CAM.")
 
         weights = self.gradients.mean(dim=(2, 3), keepdim=True)
         cam     = torch.relu((weights * self.activations).sum(dim=1)).squeeze()
-        cam     = cam.cpu().numpy()
+        cam     = cam.detach().cpu().numpy()
         cam     = (cam - cam.min()) / (cam.max() - cam.min() + 1e-8)
         return cam
 
@@ -154,16 +147,22 @@ app = FastAPI(title="FingerPrint2BloodGroup API", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-app.mount("/static", StaticFiles(directory="static"), name="static")
+if os.path.exists("static"):
+    app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # ── 7. ROUTES ─────────────────────────────────────────────────────────────────
 @app.get("/", include_in_schema=False)
 async def serve_frontend():
-    return FileResponse("static/index.html")
+    if os.path.exists("static/index.html"):
+        return FileResponse("static/index.html")
+    if os.path.exists("index.html"):
+        return FileResponse("index.html")
+    return {"message": "FingerPrint2BloodGroup API — GET /docs for interactive reference."}
 
 
 @app.get("/health")
@@ -178,11 +177,6 @@ async def health():
 
 @app.get("/model-info")
 async def model_info():
-    """
-    Static metadata the frontend renders in its "Model Details" panel.
-    Kept separate from /predict so the details load instantly without
-    waiting on (or requiring) an uploaded image.
-    """
     ready = "model" in ml
     return {
         "architecture":   "ResNet-50 (ImageNet-pretrained backbone, layer3+layer4 fine-tuned)",
@@ -201,13 +195,17 @@ async def predict(file: UploadFile = File(...)):
     classes = ml.get("classes")
     gradcam = ml.get("gradcam")
 
-    if model is None or classes is None:
+    if model is None or classes is None or gradcam is None:
         raise HTTPException(status_code=503,
                             detail="Model not ready. Try again in a moment.")
 
-    if file.content_type not in ("image/jpeg", "image/png", "image/webp"):
+    allowed_mimes = (
+        "image/jpeg", "image/png", "image/webp", "image/bmp", "image/tiff",
+        "application/octet-stream"
+    )
+    if file.content_type and file.content_type not in allowed_mimes:
         raise HTTPException(status_code=400,
-                            detail="Only JPEG / PNG / WEBP accepted.")
+                            detail="Unsupported file format. Please upload a standard image.")
 
     try:
         t0  = time.perf_counter()
@@ -224,9 +222,9 @@ async def predict(file: UploadFile = File(...)):
         except UnidentifiedImageError:
             raise HTTPException(status_code=400, detail="Could not read image file — is it corrupted?")
 
-        tensor = transform(pil_img).unsqueeze(0).to(DEVICE)   # [1, 3, 448, 448]
+        tensor = transform(pil_img).unsqueeze(0).to(DEVICE)
 
-        # ── Inference (no_grad for speed) ─────────────────────
+        # ── Inference ─────────────────────────────────────────
         with torch.no_grad():
             outputs = model(tensor)
             probs   = torch.softmax(outputs[0], dim=0)
@@ -234,24 +232,23 @@ async def predict(file: UploadFile = File(...)):
 
         pred_idx   = idx.item()
         pred_label = str(classes[pred_idx])
-        confidence = round(float(conf.item()) * 100, 2)   # plain float
+        confidence = round(float(conf.item()) * 100, 2)
 
         all_probs = {
             str(classes[i]): round(float(probs[i]) * 100, 2)
             for i in range(len(classes))
         }
 
-        # ── Grad-CAM (separate forward+backward pass) ──────────
+        # ── Grad-CAM ──────────────────────────────────────────
         cam         = gradcam.generate(tensor, pred_idx)
         gradcam_b64 = overlay_cam(pil_img, cam)
 
         latency = round((time.perf_counter() - t0) * 1000, 2)
-        logger.info(f"Predicted: {pred_label} | "
-                    f"Confidence: {confidence}% | {latency}ms")
+        logger.info(f"Predicted: {pred_label} | Confidence: {confidence}% | {latency}ms")
 
         return JSONResponse({
             "predicted_class":   pred_label,
-            "confidence":        confidence,        # float, e.g. 72.34
+            "confidence":        confidence,
             "all_probabilities": all_probs,
             "gradcam_image":     gradcam_b64,
             "latency_ms":        latency,
@@ -265,4 +262,4 @@ async def predict(file: UploadFile = File(...)):
 
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=PORT)
+    uvicorn.run(app, host="0.0.0.0", port=PORT)
