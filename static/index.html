@@ -515,6 +515,16 @@
 <footer>Built by Nilotpal · FingerPrint2BloodGroup · Portfolio Research Project</footer>
 
 <script>
+  /* ── API Configuration ──
+     GitHub Pages only serves static files, so relative fetch('/predict')
+     calls 404 there. Route to the Hugging Face Space backend when hosted
+     on github.io; use same-origin everywhere else (e.g. local dev, HF Space itself). */
+  const HF_BACKEND_URL = 'https://nilotpaldhar2004-fingerprint-blood-group.hf.space';
+
+  const API_BASE = window.location.hostname.includes('github.io')
+    ? HF_BACKEND_URL
+    : window.location.origin;
+
   const dropZone   = document.getElementById('drop-zone');
   const browseBtn  = document.getElementById('browse-btn');
   const fileInput  = document.getElementById('file-input');
@@ -566,7 +576,7 @@
     form.append('file', selectedFile);
 
     try {
-      const res = await fetch('/predict', { method: 'POST', body: form });
+      const res = await fetch(`${API_BASE}/predict`, { method: 'POST', body: form });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         alert('Error: ' + (err.detail || res.statusText));
@@ -632,7 +642,7 @@
   // Populate model-info stats from the backend, if it exposes them.
   (async function loadModelInfo() {
     try {
-      const res = await fetch('/model-info');
+      const res = await fetch(`${API_BASE}/model-info`);
       if (!res.ok) return;
       const info = await res.json();
       if (info.val_accuracy) document.getElementById('stat-acc').textContent = `${info.val_accuracy}%`;
