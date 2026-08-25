@@ -142,7 +142,7 @@ docker run -p 7860:7860 fingerprint-blood-group
 
 ## 👤 Author
 
-**Nilotpal** — CSBS, Semester 6 | AI/ML Enthusiast  
+**Nilotpal** — CS | AI/ML 
 [HuggingFace](https://huggingface.co/nilotpaldhar2004) · [GitHub](https://github.com/nilotpaldhar2004)
 
 ---
